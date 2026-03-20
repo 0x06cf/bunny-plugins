@@ -1,0 +1,24 @@
+name: Build and Deploy
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run build
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: dist
+          branch: gh-pages
+```
+
+Commit that, then go to **Settings → Pages** and make sure the source is set to the `gh-pages` branch. It should then automatically build and your install URL will be:
+```
+https://0x06cf.github.io/bunny-plugins/UploadRedirect
