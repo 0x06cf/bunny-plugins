@@ -1,164 +1,145 @@
-(function () {
-    const { metro, storage, ui } = window.vendetta;
-    const { findByProps } = metro;
+import { findByProps } from "@metro/utils";
+import { storage } from "@vendetta/plugin";
+import { showToast } from "@vendetta/ui/toasts";
 
-    const AuthModule = findByProps("getToken");
-    const UploadModule = findByProps("promptToUpload");
+const AuthModule = findByProps("getToken");
+const UploadModule = findByProps("promptToUpload");
 
-    const KEY_CHAN  = "UploadRedirect_boostChan";
-    const KEY_LIMIT = "UploadRedirect_sizeLimitMb";
+const KEY_CHAN = "boostChan";
+const KEY_LIMIT = "sizeLimitMb";
 
-    function getSetting(key, fallback) {
-        const v = storage.impl.get(key);
-        return (v !== undefined && v !== null) ? v : fallback;
+function getSetting(key: string, fallback: any) {
+    return storage[key] !== undefined && storage[key] !== null ? storage[key] : fallback;
+}
+
+function bigEnough(files: File[]): boolean {
+    const mb = getSetting(KEY_LIMIT, 0);
+    if (mb === 0) return true;
+    return files.some(f => f.size > mb * 1024 * 1024);
+}
+
+function currentChanId(): string | null {
+    try {
+        return window.location.pathname.match(/\/channels\/(?:\d+|@me)\/(\d+)/)?.[1] ?? null;
+    } catch {
+        return null;
     }
-    function setSetting(key, value) {
-        storage.impl.set(key, value);
-    }
+}
 
-    function bigEnough(files) {
-        const mb = getSetting(KEY_LIMIT, 0);
-        if (mb === 0) return true;
-        return files.some(function (f) { return f.size > mb * 1024 * 1024; });
-    }
-
-    function currentChanId() {
-        try {
-            const m = window.location.pathname.match(/\/channels\/(?:\d+|@me)\/(\d+)/);
-            return m ? m[1] : null;
-        } catch (e) { return null; }
-    }
-
-    function toast(msg, type) {
-        try {
-            ui.toasts.open({ content: msg, source: type === "failure" ? "danger" : type });
-        } catch (e) {
-            console.log("[UploadRedirect] " + msg);
-        }
+async function reupload(files: File[], originalChan: string) {
+    const destChan = (getSetting(KEY_CHAN, "") as string).trim();
+    if (!destChan) {
+        showToast("UploadRedirect: set a boost channel ID in settings first", { type: "danger" });
+        return;
     }
 
-    async function reupload(files, originalChan) {
-        const destChan = (getSetting(KEY_CHAN, "") || "").trim();
-        if (!destChan) {
-            toast("UploadRedirect: set a boost channel ID in plugin settings first", "failure");
-            return;
-        }
+    showToast("UploadRedirect: uploading...");
 
-        toast("UploadRedirect: uploading...", "message");
+    const fd = new FormData();
+    files.forEach((f, i) => fd.append(`files[${i}]`, f, f.name));
+    fd.append("payload_json", JSON.stringify({
+        content: "",
+        attachments: files.map((f, i) => ({ id: `${i}`, filename: f.name }))
+    }));
 
-        const fd = new FormData();
-        files.forEach(function (f, i) { fd.append("files[" + i + "]", f, f.name); });
-        fd.append("payload_json", JSON.stringify({
-            content: "",
-            attachments: files.map(function (f, i) { return { id: "" + i, filename: f.name }; })
-        }));
-
-        let resp;
-        try {
-            resp = await fetch("/api/v9/channels/" + destChan + "/messages", {
-                method: "POST",
-                headers: { Authorization: AuthModule.getToken() },
-                body: fd
-            });
-        } catch (e) {
-            toast("UploadRedirect: network error — " + e.message, "failure");
-            return;
-        }
-
-        if (!resp.ok) {
-            const body = await resp.json().catch(function () { return { message: resp.statusText }; });
-            toast("UploadRedirect: failed " + resp.status + ": " + body.message, "failure");
-            return;
-        }
-
-        const json = await resp.json();
-        if (!json.attachments || !json.attachments.length) {
-            toast("UploadRedirect: no attachments returned", "failure");
-            return;
-        }
-
-        const redownloaded = await Promise.all(json.attachments.map(async function (a, i) {
-            const blob = await fetch(a.url).then(function (r) { return r.blob(); });
-            return new File([blob], (files[i] && files[i].name) || "file", { type: blob.type });
-        }));
-
-        UploadModule.promptToUpload(redownloaded, { id: originalChan }, 0);
-        toast("UploadRedirect: done!", "success");
-    }
-
-    const _attached = [];
-    const _doneInputs = new WeakSet();
-    let _mo = null;
-
-    function _on(el, ev, fn) {
-        el.addEventListener(ev, fn, true);
-        _attached.push([el, ev, fn]);
-    }
-
-    function hookInput(el) {
-        if (_doneInputs.has(el)) return;
-        _doneInputs.add(el);
-        _on(el, "change", function (e) {
-            const inp = e.target;
-            const picked = Array.from(inp.files || []);
-            if (!picked.length || !bigEnough(picked)) return;
-            e.stopImmediatePropagation();
-            try {
-                inp.value = "";
-                Object.defineProperty(inp, "files", {
-                    get: function () { return new DataTransfer().files; },
-                    configurable: true
-                });
-            } catch (e) {}
-            const ch = currentChanId();
-            if (ch) reupload(picked, ch);
+    let resp: Response;
+    try {
+        resp = await fetch(`/api/v9/channels/${destChan}/messages`, {
+            method: "POST",
+            headers: { Authorization: AuthModule.getToken() },
+            body: fd
         });
+    } catch (e: any) {
+        showToast("UploadRedirect: network error — " + e.message, { type: "danger" });
+        return;
     }
 
-    return {
-        onLoad: function () {
-            const root = document.getElementById("app-mount") || document.body;
+    if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ message: resp.statusText }));
+        showToast(`UploadRedirect: failed ${resp.status}: ${body.message}`, { type: "danger" });
+        return;
+    }
 
-            _on(root, "drop", function (e) {
-                const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-                if (!files.length || !bigEnough(files)) return;
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                const ch = currentChanId();
-                if (ch) reupload(files, ch);
-            });
+    const json = await resp.json();
+    if (!json.attachments?.length) {
+        showToast("UploadRedirect: no attachments returned", { type: "danger" });
+        return;
+    }
 
-            _on(root, "paste", function (e) {
-                const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
-                if (!files.length || !bigEnough(files)) return;
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                const ch = currentChanId();
-                if (ch) reupload(files, ch);
-            });
+    const redownloaded = await Promise.all(json.attachments.map(async (a: any, i: number) => {
+        const blob = await fetch(a.url).then(r => r.blob());
+        return new File([blob], files[i]?.name ?? "file", { type: blob.type });
+    }));
 
-            document.querySelectorAll('input[type="file"]').forEach(function (el) { hookInput(el); });
+    UploadModule.promptToUpload(redownloaded, { id: originalChan }, 0);
+    showToast("UploadRedirect: done!", { type: "success" });
+}
 
-            _mo = new MutationObserver(function (muts) {
-                muts.forEach(function (m) {
-                    m.addedNodes.forEach(function (n) {
-                        if (n instanceof HTMLInputElement && n.type === "file") {
-                            hookInput(n);
-                        } else if (n instanceof HTMLElement) {
-                            n.querySelectorAll('input[type="file"]').forEach(function (el) { hookInput(el); });
-                        }
-                    });
-                });
-            });
-            _mo.observe(document.body, { childList: true, subtree: true });
-        },
+const attached: [EventTarget, string, EventListener][] = [];
+const doneInputs = new WeakSet<HTMLInputElement>();
+let mo: MutationObserver | null = null;
 
-        onUnload: function () {
-            _attached.forEach(function (entry) {
-                entry[0].removeEventListener(entry[1], entry[2], true);
-            });
-            _attached.length = 0;
-            if (_mo) { _mo.disconnect(); _mo = null; }
-        }
-    };
-})();
+function on(el: EventTarget, ev: string, fn: EventListener) {
+    el.addEventListener(ev, fn, true);
+    attached.push([el, ev, fn]);
+}
+
+function hookInput(el: HTMLInputElement) {
+    if (doneInputs.has(el)) return;
+    doneInputs.add(el);
+    on(el, "change", (e: Event) => {
+        const inp = e.target as HTMLInputElement;
+        const picked = Array.from(inp.files ?? []);
+        if (!picked.length || !bigEnough(picked)) return;
+        e.stopImmediatePropagation();
+        try {
+            inp.value = "";
+            Object.defineProperty(inp, "files", { get: () => new DataTransfer().files, configurable: true });
+        } catch { }
+        const ch = currentChanId();
+        if (ch) reupload(picked, ch);
+    });
+}
+
+export default {
+    onLoad() {
+        const root = document.getElementById("app-mount") ?? document.body;
+
+        on(root, "drop", (e: Event) => {
+            const de = e as DragEvent;
+            const files = Array.from(de.dataTransfer?.files ?? []);
+            if (!files.length || !bigEnough(files)) return;
+            e.preventDefault();
+            de.stopImmediatePropagation();
+            const ch = currentChanId();
+            if (ch) reupload(files, ch);
+        });
+
+        on(root, "paste", (e: Event) => {
+            const ce = e as ClipboardEvent;
+            const files = Array.from(ce.clipboardData?.files ?? []);
+            if (!files.length || !bigEnough(files)) return;
+            e.preventDefault();
+            ce.stopImmediatePropagation();
+            const ch = currentChanId();
+            if (ch) reupload(files, ch);
+        });
+
+        document.querySelectorAll<HTMLInputElement>('input[type="file"]').forEach(el => hookInput(el));
+
+        mo = new MutationObserver(muts => {
+            for (const m of muts) for (const n of m.addedNodes) {
+                if (n instanceof HTMLInputElement && n.type === "file") hookInput(n);
+                else if (n instanceof HTMLElement) n.querySelectorAll<HTMLInputElement>('input[type="file"]').forEach(el => hookInput(el));
+            }
+        });
+        mo.observe(document.body, { childList: true, subtree: true });
+    },
+
+    onUnload() {
+        attached.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn, true));
+        attached.length = 0;
+        mo?.disconnect();
+        mo = null;
+    }
+};
